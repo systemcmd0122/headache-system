@@ -770,6 +770,8 @@ body::after {
 </div><!-- /page -->
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/luxon/3.4.4/luxon.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
 <script>
 /* ── SHEETS API CONFIG ── */
 const SHEETS_API_KEY = 'AIzaSyAsueqj-8qHU6nejrrCqC2jY45OJMHy50I';
@@ -801,10 +803,16 @@ function parseSheetRows(rows) {
   return rows
     .filter(r => r.length >= 6 && r[2] && r[3] && r[4] && r[5])
     .map(r => {
-      const dtStr   = r[0] || '';
+      const dtStr    = r[0] || '';
       const timePart = dtStr.includes(' ') ? dtStr.split(' ')[1] : dtStr;
+      const hhmm     = timePart.substring(0, 5); // "HH:MM"
+      // X軸に実時刻を使うためDateオブジェクトを生成
+      const [hh, mm] = hhmm.split(':').map(Number);
+      const d = new Date();
+      d.setHours(hh, mm, 0, 0);
       return {
-        t:    timePart.substring(0, 5),
+        t:    hhmm,
+        ts:   d.getTime(),   // ← ミリ秒タイムスタンプ
         p:    parseFloat(r[2]),
         temp: parseFloat(r[3]),
         h:    parseFloat(r[4]),
@@ -929,17 +937,15 @@ function clipLiveData(data) {
 function buildMainChart(mode, forceRebuild) {
   if (!liveData.length) return;
   const cfg  = MODES[mode];
-  const vals = liveData.map(r=>r[cfg.key]);
-  const lbls = liveData.map(r=>r.t);
-  const mn   = Math.min(...vals), mxv = Math.max(...vals);
+  const vals = liveData.map(r => ({ x: r.ts, y: r[cfg.key] }));
+  const mn   = Math.min(...liveData.map(r=>r[cfg.key]));
+  const mxv  = Math.max(...liveData.map(r=>r[cfg.key]));
   const pad  = Math.max((mxv-mn)*.18,.05);
 
   document.getElementById('chartTtl').textContent   = cfg.ttl;
   document.getElementById('chartRange').textContent = mn.toFixed(cfg.dec) + ' – ' + mxv.toFixed(cfg.dec) + (cfg.unit?' '+cfg.unit:'');
 
-  // 既存チャートがあり、モード変更なし（データ更新のみ）の場合は差分更新
   if (mainChart && !forceRebuild) {
-    mainChart.data.labels = lbls;
     mainChart.data.datasets[0].data = vals;
     mainChart.options.scales.y.min = mn - pad;
     mainChart.options.scales.y.max = mxv + pad;
@@ -951,7 +957,6 @@ function buildMainChart(mode, forceRebuild) {
   mainChart = new Chart(document.getElementById('mc'), {
     type: 'line',
     data: {
-      labels: lbls,
       datasets: [{
         data: vals,
         borderColor: cfg.color,
@@ -985,11 +990,11 @@ function buildMainChart(mode, forceRebuild) {
           titleFont: {...MONO, size: 11},
           bodyFont: {...MONO, size: 15, weight: '700'},
           callbacks: {
-            title: items => items[0].label,
-            label: c => {
-              const val = c.parsed.y.toFixed(cfg.dec);
-              return '  ' + val + (cfg.unit ? ' ' + cfg.unit : '');
-            }
+            title: items => {
+              const d = new Date(items[0].parsed.x);
+              return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+            },
+            label: c => '  ' + c.parsed.y.toFixed(cfg.dec) + (cfg.unit ? ' ' + cfg.unit : '')
           }
         }
       },
@@ -1008,6 +1013,13 @@ function buildMainChart(mode, forceRebuild) {
           border: {color: 'transparent', dash: [4, 4]}
         },
         x: {
+          type: 'time',
+          time: {
+            unit: 'minute',
+            stepSize: 30,
+            displayFormats: { minute: 'HH:mm' }
+          },
+          adapters: { date: {} },
           ticks: {
             color: TC,
             font: {...MONO, size: 10},
@@ -1032,12 +1044,9 @@ const MINI_DEFS = [
 
 function buildMiniCharts(forceRebuild) {
   const last = liveData.slice(-30);
-  const lbls = last.map(r=>r.t);
   MINI_DEFS.forEach(m => {
-    const data = last.map(r=>r[m.key]);
-    // 既存チャートがあればデータだけ更新
+    const data = last.map(r => ({ x: r.ts, y: r[m.key] }));
     if (miniCharts[m.id] && !forceRebuild) {
-      miniCharts[m.id].data.labels = lbls;
       miniCharts[m.id].data.datasets[0].data = data;
       miniCharts[m.id].update('none');
       return;
@@ -1046,7 +1055,6 @@ function buildMiniCharts(forceRebuild) {
     miniCharts[m.id] = new Chart(document.getElementById(m.id), {
       type:'line',
       data:{
-        labels: lbls,
         datasets:[{
           data,
           borderColor: m.color,
@@ -1078,12 +1086,22 @@ function buildMiniCharts(forceRebuild) {
             titleFont: {family:"'Space Mono',monospace", size:10},
             bodyFont: {family:"'Space Mono',monospace", size:13, weight:'700'},
             callbacks:{
-              title: items => items[0].label,
+              title: items => {
+                const d = new Date(items[0].parsed.x);
+                return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+              },
               label: c => '  ' + c.parsed.y.toFixed(m.dec) + ' ' + m.unit
             }
           }
         },
-        scales:{y:{display:false},x:{display:false}}
+        scales:{
+          y:{display:false},
+          x:{
+            type:'time',
+            time:{ unit:'minute', displayFormats:{ minute:'HH:mm' } },
+            display:false
+          }
+        }
       }
     });
   });
