@@ -799,38 +799,28 @@ let prevPred    = null;
 const RING_C    = 87.96;
 
 /* ── SHEETS DATA PARSER ── */
-function parseDtToISO(dtStr) {
-  // "YYYY/MM/DD HH:MM:SS" or "YYYY/MM/DD HH:MM" → ISO "YYYY-MM-DDTHH:mm:ss"
-  // "HH:MM:SS" or "HH:MM" → today's date補完
+function parseDtToTs(dtStr) {
   dtStr = (dtStr || '').trim();
   if (!dtStr) return NaN;
   if (dtStr.includes(' ')) {
-    // 日付＋時刻: スラッシュをハイフンに、スペースをTに置換してISO化
-    const iso = dtStr.replace(/\//g, '-').replace(' ', 'T');
-    return new Date(iso).getTime();
-  } else if (dtStr.includes(':')) {
-    // 時刻のみ → 今日のローカル日付を補う
-    const now = new Date();
-    const [hh, mm, ss = '00'] = dtStr.split(':');
-    return new Date(
-      now.getFullYear(), now.getMonth(), now.getDate(),
-      Number(hh), Number(mm), Number(ss)
-    ).getTime();
+    // "YYYY/MM/DD HH:MM:SS" → ISO "YYYY-MM-DDTHH:mm:ss" でローカル解釈
+    return new Date(dtStr.replace(/\//g, '-').replace(' ', 'T')).getTime();
   }
-  return NaN;
+  // 時刻のみ → 今日のローカル日付を補う
+  const [hh, mm, ss = '00'] = dtStr.split(':');
+  const n = new Date();
+  return new Date(n.getFullYear(), n.getMonth(), n.getDate(), +hh, +mm, +ss).getTime();
 }
 
 function parseSheetRows(rows) {
   return rows
     .filter(r => r.length >= 6 && r[2] && r[3] && r[4] && r[5])
     .map(r => {
-      const ts = parseDtToISO(r[0]);
+      const ts = parseDtToTs(r[0]);
       const d  = new Date(ts);
-      // 表示用: 日付をまたぐ場合は日付も含めた文字列
       const t  = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
       return {
-        t,
-        ts,
+        t, ts,
         p:    parseFloat(r[2]),
         temp: parseFloat(r[3]),
         h:    parseFloat(r[4]),
@@ -947,9 +937,11 @@ const GC = 'rgba(80,120,255,0.10)';
 const TC = 'rgba(180,210,255,0.70)'; // much brighter tick labels
 
 /* ── liveDataを最大200点に制限 ── */
-const MAX_DATA_POINTS = 200;
+const WINDOW_MS = 24 * 60 * 60 * 1000; // 24時間ウィンドウ
 function clipLiveData(data) {
-  return data.length > MAX_DATA_POINTS ? data.slice(-MAX_DATA_POINTS) : data;
+  const cutoff = Date.now() - WINDOW_MS;
+  const filtered = data.filter(r => r.ts >= cutoff);
+  return filtered.length ? filtered : data.slice(-1);
 }
 
 function buildMainChart(mode, forceRebuild) {
@@ -963,54 +955,6 @@ function buildMainChart(mode, forceRebuild) {
   document.getElementById('chartTtl').textContent   = cfg.ttl;
   document.getElementById('chartRange').textContent = mn.toFixed(cfg.dec) + ' – ' + mxv.toFixed(cfg.dec) + (cfg.unit?' '+cfg.unit:'');
 
-  // データの時間スパンに応じてX軸の単位・刻みを動的設定
-  const tsFirst = liveData[0]?.ts ?? 0;
-  const tsLast  = liveData[liveData.length - 1]?.ts ?? 0;
-  const spanMs  = tsLast - tsFirst;
-  const spanH   = spanMs / 3600000;
-  const multiDay = spanH >= 20; // 20時間超なら複数日モード
-
-  let xUnit, xStepSize, xFmt, xTickCb;
-  if (spanH <= 6) {
-    xUnit = 'minute'; xStepSize = 30;
-    xFmt = { minute: 'HH:mm' };
-    xTickCb = val => {
-      const d = new Date(val);
-      return d.getMinutes() % 30 === 0
-        ? String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0')
-        : null;
-    };
-  } else if (spanH <= 48) {
-    xUnit = 'hour'; xStepSize = 1;
-    xFmt = { hour: multiDay ? 'M/D HH:mm' : 'HH:mm', day: 'M/D' };
-    xTickCb = val => {
-      const d = new Date(val);
-      const hh = String(d.getHours()).padStart(2,'0');
-      const mm = String(d.getMinutes()).padStart(2,'0');
-      if (multiDay && d.getHours() === 0) {
-        return (d.getMonth()+1) + '/' + String(d.getDate()).padStart(2,'0');
-      }
-      return d.getMinutes() === 0 ? hh + ':' + mm : null;
-    };
-  } else {
-    xUnit = 'day'; xStepSize = 1;
-    xFmt = { day: 'M/D' };
-    xTickCb = val => {
-      const d = new Date(val);
-      return (d.getMonth()+1) + '/' + String(d.getDate()).padStart(2,'0');
-    };
-  }
-
-  const tooltipTitle = items => {
-    const d = new Date(items[0].parsed.x);
-    const hh = String(d.getHours()).padStart(2,'0');
-    const mm = String(d.getMinutes()).padStart(2,'0');
-    if (multiDay) {
-      return (d.getMonth()+1) + '/' + String(d.getDate()).padStart(2,'0') + ' ' + hh + ':' + mm;
-    }
-    return hh + ':' + mm;
-  };
-
   if (mainChart && !forceRebuild) {
     mainChart.data.datasets[0].data = vals;
     mainChart.options.scales.y.min = mn - pad;
@@ -1018,6 +962,10 @@ function buildMainChart(mode, forceRebuild) {
     mainChart.update('none');
     return;
   }
+
+  // 24時間固定ウィンドウ: 現在時刻を右端に
+  const xMax = Date.now();
+  const xMin = xMax - WINDOW_MS;
 
   if (mainChart) mainChart.destroy();
   mainChart = new Chart(document.getElementById('mc'), {
@@ -1056,7 +1004,18 @@ function buildMainChart(mode, forceRebuild) {
           titleFont: {...MONO, size: 11},
           bodyFont: {...MONO, size: 15, weight: '700'},
           callbacks: {
-            title: tooltipTitle,
+            title: items => {
+              const d = new Date(items[0].parsed.x);
+              const mo = String(d.getMonth()+1).padStart(2,'0');
+              const dd = String(d.getDate()).padStart(2,'0');
+              const hh = String(d.getHours()).padStart(2,'0');
+              const mm = String(d.getMinutes()).padStart(2,'0');
+              // 昨日のデータが含まれる場合は日付も表示
+              const startD = new Date(xMin);
+              const endD   = new Date(xMax);
+              const multiDay = startD.getDate() !== endD.getDate();
+              return multiDay ? `${mo}/${dd} ${hh}:${mm}` : `${hh}:${mm}`;
+            },
             label: c => '  ' + c.parsed.y.toFixed(cfg.dec) + (cfg.unit ? ' ' + cfg.unit : '')
           }
         }
@@ -1077,10 +1036,12 @@ function buildMainChart(mode, forceRebuild) {
         },
         x: {
           type: 'time',
+          min: xMin,
+          max: xMax,
           time: {
-            unit: xUnit,
-            stepSize: xStepSize,
-            displayFormats: xFmt
+            unit: 'hour',
+            stepSize: 1,
+            displayFormats: { hour: 'HH:mm', day: 'M/D' }
           },
           adapters: { date: {} },
           ticks: {
@@ -1088,9 +1049,18 @@ function buildMainChart(mode, forceRebuild) {
             font: {...MONO, size: 10},
             maxRotation: 0,
             autoSkip: true,
-            maxTicksLimit: 12,
+            maxTicksLimit: 13,
             padding: 6,
-            callback: xTickCb
+            // 2時間ごとにラベル。日付変わり目は M/D 表示
+            callback(val) {
+              const d = new Date(val);
+              if (d.getHours() === 0 && d.getMinutes() === 0) {
+                return (d.getMonth()+1) + '/' + String(d.getDate()).padStart(2,'0');
+              }
+              return d.getHours() % 2 === 0
+                ? String(d.getHours()).padStart(2,'0') + ':00'
+                : null;
+            }
           },
           grid: {color: GC, lineWidth: 1},
           border: {color: 'transparent'}
