@@ -439,6 +439,47 @@ body::after {
 }
 
 /* ══════════════════════════════════════════
+   スマホ横向き — 縦スペースをコンパクトに
+══════════════════════════════════════════ */
+@media (max-width: 767px) and (orientation: landscape) {
+  :root {
+    --page-pad: 8px;
+    --gap: 7px;
+  }
+  /* ヘッダーを詰める */
+  .header {
+    padding-bottom: 6px;
+  }
+  .logo-icon { width: 28px; height: 28px; border-radius: 8px; }
+  .logo-text { font-size: 12px; }
+  .logo-sub  { display: none; }
+  .clock-time { font-size: 14px; }
+  .clock-date { display: none; }
+  .live-badge { padding: 3px 8px; font-size: 9px; }
+
+  /* リスクカードを横並びにして縦を節約 */
+  .risk-top { margin-bottom: 8px; }
+  .risk-score-num { font-size: 40px; }
+  .risk-score-denom { font-size: 9px; }
+  .risk-trend { margin-top: 4px; }
+  .card-label { margin-bottom: 6px; }
+  .progress-track { margin: 8px 0 4px; }
+
+  /* メトリクス */
+  .metric-card { padding: 8px 7px; }
+  .metric-val  { font-size: 15px; }
+  .metric-icon { margin-bottom: 4px; }
+
+  /* チャート高さを抑える */
+  .chart-wrap  { height: 180px; }
+  .mini-wrap   { height: 40px; }
+
+  /* タブボタン */
+  .tab-btn { padding: 4px 9px; font-size: 9px; }
+  .auto-rotate-badge { font-size: 9px; padding: 3px 8px; }
+}
+
+/* ══════════════════════════════════════════
    ROTATE PROMPT — スマホ縦向き専用
 ══════════════════════════════════════════ */
 #rotate-prompt {
@@ -819,7 +860,8 @@ function render(flash) {
   pill.style.borderColor  = lv.fg;
 
   document.getElementById('riskScore').textContent    = d.pred.toFixed(3);
-  document.getElementById('progressFill').style.width = lv.pct + '%';
+  // 実スコア値(0〜5)をそのままパーセントに変換（最大5.0 → 100%）
+  document.getElementById('progressFill').style.width = Math.min(d.pred / 5 * 100, 100) + '%';
 
   const icon = document.getElementById('trendIcon');
   const txt  = document.getElementById('trendText');
@@ -861,8 +903,9 @@ function render(flash) {
   document.getElementById('miniTempVal').textContent  = d.temp.toFixed(1)  + ' ℃';
   document.getElementById('miniHumidVal').textContent = d.h + ' %';
 
-  buildMainChart(currentMode);
-  buildMiniCharts();
+  // チャートはデータ差分更新（destroy→再構築しない）
+  buildMainChart(currentMode, false);
+  buildMiniCharts(false);
 }
 
 const MODES = {
@@ -877,7 +920,14 @@ const MONO = {family:"'Space Mono',monospace"};
 const GC = 'rgba(80,120,255,0.10)';
 const TC = 'rgba(180,210,255,0.70)'; // much brighter tick labels
 
-function buildMainChart(mode) {
+/* ── liveDataを最大200点に制限 ── */
+const MAX_DATA_POINTS = 200;
+function clipLiveData(data) {
+  return data.length > MAX_DATA_POINTS ? data.slice(-MAX_DATA_POINTS) : data;
+}
+
+function buildMainChart(mode, forceRebuild) {
+  if (!liveData.length) return;
   const cfg  = MODES[mode];
   const vals = liveData.map(r=>r[cfg.key]);
   const lbls = liveData.map(r=>r.t);
@@ -886,6 +936,16 @@ function buildMainChart(mode) {
 
   document.getElementById('chartTtl').textContent   = cfg.ttl;
   document.getElementById('chartRange').textContent = mn.toFixed(cfg.dec) + ' – ' + mxv.toFixed(cfg.dec) + (cfg.unit?' '+cfg.unit:'');
+
+  // 既存チャートがあり、モード変更なし（データ更新のみ）の場合は差分更新
+  if (mainChart && !forceRebuild) {
+    mainChart.data.labels = lbls;
+    mainChart.data.datasets[0].data = vals;
+    mainChart.options.scales.y.min = mn - pad;
+    mainChart.options.scales.y.max = mxv + pad;
+    mainChart.update('none');
+    return;
+  }
 
   if (mainChart) mainChart.destroy();
   mainChart = new Chart(document.getElementById('mc'), {
@@ -903,7 +963,7 @@ function buildMainChart(mode) {
         pointHoverBorderColor: '#fff',
         pointHoverBorderWidth: 2,
         fill: true,
-        tension: 0.38
+        tension: 0
       }]
     },
     options: {
@@ -964,22 +1024,31 @@ function buildMainChart(mode) {
   });
 }
 
-function buildMiniCharts() {
+const MINI_DEFS = [
+  {id:'mcPress',key:'p',    color:'#4a8fff',fill:'rgba(74,143,255,.15)', unit:'hPa', dec:2},
+  {id:'mcTemp', key:'temp', color:'#ff8c42',fill:'rgba(255,140,66,.15)',  unit:'℃',  dec:1},
+  {id:'mcHumid',key:'h',    color:'#00d4ff',fill:'rgba(0,212,255,.15)',   unit:'%',  dec:0}
+];
+
+function buildMiniCharts(forceRebuild) {
   const last = liveData.slice(-30);
   const lbls = last.map(r=>r.t);
-  const defs = [
-    {id:'mcPress',key:'p',    color:'#4a8fff',fill:'rgba(74,143,255,.15)', unit:'hPa', dec:2},
-    {id:'mcTemp', key:'temp', color:'#ff8c42',fill:'rgba(255,140,66,.15)',  unit:'℃',  dec:1},
-    {id:'mcHumid',key:'h',    color:'#00d4ff',fill:'rgba(0,212,255,.15)',   unit:'%',  dec:0}
-  ];
-  defs.forEach(m => {
+  MINI_DEFS.forEach(m => {
+    const data = last.map(r=>r[m.key]);
+    // 既存チャートがあればデータだけ更新
+    if (miniCharts[m.id] && !forceRebuild) {
+      miniCharts[m.id].data.labels = lbls;
+      miniCharts[m.id].data.datasets[0].data = data;
+      miniCharts[m.id].update('none');
+      return;
+    }
     if (miniCharts[m.id]) miniCharts[m.id].destroy();
     miniCharts[m.id] = new Chart(document.getElementById(m.id), {
       type:'line',
       data:{
         labels: lbls,
         datasets:[{
-          data: last.map(r=>r[m.key]),
+          data,
           borderColor: m.color,
           backgroundColor: m.fill,
           fill: true,
@@ -988,7 +1057,7 @@ function buildMiniCharts() {
           pointHoverBackgroundColor: m.color,
           pointHoverBorderColor: '#fff',
           pointHoverBorderWidth: 1.5,
-          tension: 0.4,
+          tension: 0,
           borderWidth: 2
         }]
       },
@@ -1031,9 +1100,9 @@ function switchToMode(mode, fromUser) {
   const btn = document.querySelector(`.tab-btn[data-mode="${mode}"]`);
   if (btn) btn.classList.add('on');
   currentMode = mode;
-  buildMainChart(mode);
+  // モード切替は必ず色・軸を再構築
+  buildMainChart(mode, true);
   if (fromUser) {
-    // reset rotation countdown
     rotateIndex = MODE_KEYS.indexOf(mode);
     rotateTick  = ROTATE_INTERVAL;
     updateRotateBadge();
@@ -1100,7 +1169,7 @@ function tick() {
     countdown = FETCH_INTERVAL;
     fetchSheetData().then(data => {
       if (data && data.length) {
-        liveData = data;
+        liveData = clipLiveData(data);
         render(true);
       }
     });
@@ -1115,7 +1184,7 @@ function tick() {
 
   const data = await fetchSheetData();
   if (data && data.length) {
-    liveData = data;
+    liveData = clipLiveData(data);
   } else {
     // フォールバック: 最低限1点のダミーデータで表示を維持
     const now = new Date();
@@ -1123,7 +1192,7 @@ function tick() {
     liveData = [{ t, p: 1013.00, temp: 25.0, h: 60, pred: 0.5 }];
   }
 
-  render(false);
+  render(false);  // 初回は forceRebuild=true で内部的に新規構築される
   setInterval(tick, 1000);
 })();
 </script>
