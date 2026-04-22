@@ -803,8 +803,14 @@ function parseDtToTs(dtStr) {
   dtStr = (dtStr || '').trim();
   if (!dtStr) return NaN;
   if (dtStr.includes(' ')) {
-    // "YYYY/MM/DD HH:MM:SS" → ISO "YYYY-MM-DDTHH:mm:ss" でローカル解釈
-    return new Date(dtStr.replace(/\//g, '-').replace(' ', 'T')).getTime();
+    // "YYYY/MM/DD H:MM:SS" or "YYYY/MM/DD HH:MM:SS"
+    // スラッシュをハイフンに、スペースをTに変換しつつ時を必ず2桁にする
+    const [datePart, timePart] = dtStr.split(' ');
+    const dateNorm = datePart.replace(/\//g, '-');
+    const [hh, mm, ss = '00'] = timePart.split(':');
+    // new Date(y, m, d, h, m, s) でローカルタイム確定解釈
+    const [y, mo, d] = dateNorm.split('-');
+    return new Date(+y, +mo - 1, +d, +hh, +mm, +ss).getTime();
   }
   // 時刻のみ → 今日のローカル日付を補う
   const [hh, mm, ss = '00'] = dtStr.split(':');
