@@ -799,27 +799,45 @@ let prevPred    = null;
 const RING_C    = 87.96;
 
 /* ── SHEETS DATA PARSER ── */
+function parseDtToISO(dtStr) {
+  // "YYYY/MM/DD HH:MM:SS" or "YYYY/MM/DD HH:MM" → ISO "YYYY-MM-DDTHH:mm:ss"
+  // "HH:MM:SS" or "HH:MM" → today's date補完
+  dtStr = (dtStr || '').trim();
+  if (!dtStr) return NaN;
+  if (dtStr.includes(' ')) {
+    // 日付＋時刻: スラッシュをハイフンに、スペースをTに置換してISO化
+    const iso = dtStr.replace(/\//g, '-').replace(' ', 'T');
+    return new Date(iso).getTime();
+  } else if (dtStr.includes(':')) {
+    // 時刻のみ → 今日のローカル日付を補う
+    const now = new Date();
+    const [hh, mm, ss = '00'] = dtStr.split(':');
+    return new Date(
+      now.getFullYear(), now.getMonth(), now.getDate(),
+      Number(hh), Number(mm), Number(ss)
+    ).getTime();
+  }
+  return NaN;
+}
+
 function parseSheetRows(rows) {
   return rows
     .filter(r => r.length >= 6 && r[2] && r[3] && r[4] && r[5])
     .map(r => {
-      const dtStr    = r[0] || '';
-      const timePart = dtStr.includes(' ') ? dtStr.split(' ')[1] : dtStr;
-      const hhmm     = timePart.substring(0, 5); // "HH:MM"
-      // X軸に実時刻を使うためDateオブジェクトを生成
-      const [hh, mm] = hhmm.split(':').map(Number);
-      const d = new Date();
-      d.setHours(hh, mm, 0, 0);
+      const ts = parseDtToISO(r[0]);
+      const d  = new Date(ts);
+      // 表示用: 日付をまたぐ場合は日付も含めた文字列
+      const t  = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
       return {
-        t:    hhmm,
-        ts:   d.getTime(),   // ← ミリ秒タイムスタンプ
+        t,
+        ts,
         p:    parseFloat(r[2]),
         temp: parseFloat(r[3]),
         h:    parseFloat(r[4]),
         pred: parseFloat(r[5])
       };
     })
-    .filter(r => !isNaN(r.p) && !isNaN(r.temp) && !isNaN(r.h) && !isNaN(r.pred));
+    .filter(r => !isNaN(r.ts) && !isNaN(r.p) && !isNaN(r.temp) && !isNaN(r.h) && !isNaN(r.pred));
 }
 
 /* ── FETCH FROM SHEETS ── */
@@ -945,6 +963,54 @@ function buildMainChart(mode, forceRebuild) {
   document.getElementById('chartTtl').textContent   = cfg.ttl;
   document.getElementById('chartRange').textContent = mn.toFixed(cfg.dec) + ' – ' + mxv.toFixed(cfg.dec) + (cfg.unit?' '+cfg.unit:'');
 
+  // データの時間スパンに応じてX軸の単位・刻みを動的設定
+  const tsFirst = liveData[0]?.ts ?? 0;
+  const tsLast  = liveData[liveData.length - 1]?.ts ?? 0;
+  const spanMs  = tsLast - tsFirst;
+  const spanH   = spanMs / 3600000;
+  const multiDay = spanH >= 20; // 20時間超なら複数日モード
+
+  let xUnit, xStepSize, xFmt, xTickCb;
+  if (spanH <= 6) {
+    xUnit = 'minute'; xStepSize = 30;
+    xFmt = { minute: 'HH:mm' };
+    xTickCb = val => {
+      const d = new Date(val);
+      return d.getMinutes() % 30 === 0
+        ? String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0')
+        : null;
+    };
+  } else if (spanH <= 48) {
+    xUnit = 'hour'; xStepSize = 1;
+    xFmt = { hour: multiDay ? 'M/D HH:mm' : 'HH:mm', day: 'M/D' };
+    xTickCb = val => {
+      const d = new Date(val);
+      const hh = String(d.getHours()).padStart(2,'0');
+      const mm = String(d.getMinutes()).padStart(2,'0');
+      if (multiDay && d.getHours() === 0) {
+        return (d.getMonth()+1) + '/' + String(d.getDate()).padStart(2,'0');
+      }
+      return d.getMinutes() === 0 ? hh + ':' + mm : null;
+    };
+  } else {
+    xUnit = 'day'; xStepSize = 1;
+    xFmt = { day: 'M/D' };
+    xTickCb = val => {
+      const d = new Date(val);
+      return (d.getMonth()+1) + '/' + String(d.getDate()).padStart(2,'0');
+    };
+  }
+
+  const tooltipTitle = items => {
+    const d = new Date(items[0].parsed.x);
+    const hh = String(d.getHours()).padStart(2,'0');
+    const mm = String(d.getMinutes()).padStart(2,'0');
+    if (multiDay) {
+      return (d.getMonth()+1) + '/' + String(d.getDate()).padStart(2,'0') + ' ' + hh + ':' + mm;
+    }
+    return hh + ':' + mm;
+  };
+
   if (mainChart && !forceRebuild) {
     mainChart.data.datasets[0].data = vals;
     mainChart.options.scales.y.min = mn - pad;
@@ -990,10 +1056,7 @@ function buildMainChart(mode, forceRebuild) {
           titleFont: {...MONO, size: 11},
           bodyFont: {...MONO, size: 15, weight: '700'},
           callbacks: {
-            title: items => {
-              const d = new Date(items[0].parsed.x);
-              return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
-            },
+            title: tooltipTitle,
             label: c => '  ' + c.parsed.y.toFixed(cfg.dec) + (cfg.unit ? ' ' + cfg.unit : '')
           }
         }
@@ -1015,9 +1078,9 @@ function buildMainChart(mode, forceRebuild) {
         x: {
           type: 'time',
           time: {
-            unit: 'minute',
-            stepSize: 30,
-            displayFormats: { minute: 'HH:mm' }
+            unit: xUnit,
+            stepSize: xStepSize,
+            displayFormats: xFmt
           },
           adapters: { date: {} },
           ticks: {
@@ -1025,8 +1088,9 @@ function buildMainChart(mode, forceRebuild) {
             font: {...MONO, size: 10},
             maxRotation: 0,
             autoSkip: true,
-            maxTicksLimit: 10,
-            padding: 6
+            maxTicksLimit: 12,
+            padding: 6,
+            callback: xTickCb
           },
           grid: {color: GC, lineWidth: 1},
           border: {color: 'transparent'}
